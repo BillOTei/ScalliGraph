@@ -28,23 +28,24 @@ object ResponseType extends Enumeration {
 }
 
 case class OAuth2Config(
-    clientId: String,
-    clientSecret: String,
-    redirectUri: String,
-    responseType: ResponseType,
-    grantType: GrantType,
-    authorizationUrl: String,
-    tokenUrl: String,
-    userUrl: String,
-    scope: Seq[String],
-    autoCreate: Boolean,
-    autoUpdate: Boolean
-)
+                         clientId: String,
+                         clientSecret: String,
+                         redirectUri: String,
+                         responseType: ResponseType,
+                         grantType: GrantType,
+                         authorizationUrl: String,
+                         tokenUrl: String,
+                         userUrl: String,
+                         scope: Seq[String],
+                         autoCreate: Boolean,
+                         autoUpdate: Boolean
+                       )
 
 class TokenizedRequest[A](val token: Option[String], request: Request[A])                extends WrappedRequest[A](request)
 class OAuthenticatedRequest[A](val user: Option[JsObject], request: TokenizedRequest[A]) extends WrappedRequest[A](request)
 
-class OAuth2Srv(OAuth2Config: OAuth2Config, userSrv: UserSrv, WSClient: WSClient)(implicit ec: ExecutionContext) extends AuthSrv {
+class OAuth2Srv(OAuth2Config: OAuth2Config, userSrv: UserSrv, WSClient: WSClient, configuration: Configuration)(implicit ec: ExecutionContext)
+  extends AuthSrv {
   lazy val logger      = Logger(getClass)
   val name: String     = "oauth2"
   val endpoint: String = "ssoLogin"
@@ -55,6 +56,7 @@ class OAuth2Srv(OAuth2Config: OAuth2Config, userSrv: UserSrv, WSClient: WSClient
         authRedirect
           .andThen(authTokenFromCode)
           .andThen(userFromToken)
+          .andThen(authenticate)
           .andThen(super.actionFunction(nextFunction))
 
       case x =>
@@ -150,11 +152,23 @@ class OAuth2Srv(OAuth2Config: OAuth2Config, userSrv: UserSrv, WSClient: WSClient
 
         case _ => Future.failed(AuthenticationError("OAuth2 user data fetch unexpected response from server"))
       }
+
+  private def authenticate: ActionTransformer[OAuthenticatedRequest, AuthenticatedRequest] =
+    new ActionTransformer[OAuthenticatedRequest, AuthenticatedRequest] {
+      def executionContext: ExecutionContext = ec
+
+      def transform[A](request: OAuthenticatedRequest[A]): Future[AuthenticatedRequest[A]] =
+        for {
+          jsonUser <- Future.fromTry(Try(request.user.get))
+          user = SimpleUser.apply(jsonUser, configuration)
+          authContext <- Future.fromTry(userSrv.getAuthContext(request, user.id, user.organisation))
+        } yield new AuthenticatedRequest[A](authContext, request)
+    }
 }
 
 @Singleton
 class OAuth2Provider @Inject()(userSrv: UserSrv, config: Configuration, WSClient: WSClient, implicit val executionContext: ExecutionContext)
-    extends AuthSrvProvider {
+  extends AuthSrvProvider {
   override val name: String = "oauth2"
   override def apply(configuration: Configuration): Try[AuthSrv] =
     for {
@@ -167,11 +181,12 @@ class OAuth2Provider @Inject()(userSrv: UserSrv, config: Configuration, WSClient
       userUrl          <- configuration.getOrFail[String]("userUrl")
       tokenUrl         <- configuration.getOrFail[String]("tokenUrl")
       scope            <- configuration.getOrFail[Seq[String]]("scope")
-      autoCreate = config.getOptional[Boolean]("auth.sso.autoCreate").getOrElse(false)
-      autoUpdate = config.getOptional[Boolean]("auth.sso.autoUpdate").getOrElse(false)
+      autoCreate = config.getOptional[Boolean]("auth.sso.autocreate").getOrElse(false)
+      autoUpdate = config.getOptional[Boolean]("auth.sso.autoupdate").getOrElse(false)
     } yield new OAuth2Srv(
       OAuth2Config(clientId, clientSecret, redirectUri, responseType, grantType, authorizationUrl, tokenUrl, userUrl, scope, autoCreate, autoUpdate),
       userSrv,
-      WSClient
+      WSClient,
+      configuration
     )
 }
