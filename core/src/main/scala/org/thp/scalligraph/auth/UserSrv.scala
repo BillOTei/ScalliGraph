@@ -1,18 +1,19 @@
 package org.thp.scalligraph.auth
 
-import scala.util.Try
-
+import org.thp.scalligraph.utils.Instance
+import play.api.Configuration
 import play.api.libs.functional.syntax._
-import play.api.libs.json.{JsPath, Json, Reads, Writes}
+import play.api.libs.json._
 import play.api.mvc.RequestHeader
 
-import org.thp.scalligraph.utils.Instance
+import scala.util.Try
 
 trait PermissionTag
 
 object Permission {
-  def apply(name: String): Permission            = shapeless.tag[PermissionTag][String](name)
   def apply(names: Set[String]): Set[Permission] = names.map(apply)
+
+  def apply(name: String): Permission = shapeless.tag[PermissionTag][String](name)
 }
 
 trait AuthContext {
@@ -61,4 +62,23 @@ trait UserSrv {
 trait User {
   val id: String
   def getUserName: String
+}
+
+case class SimpleUser(id: String, name: String, organisation: Option[String]) extends User {
+  override def getUserName: String = name
+}
+
+object SimpleUser {
+
+  def apply(jsObject: JsObject, configuration: Configuration): SimpleUser = {
+    val idField           = configuration.getOptional[String]("auth.sso.attributes.userId").getOrElse("")
+    val nameField         = configuration.getOptional[String]("auth.sso.attributes.name").getOrElse("")
+    val organisationField = configuration.getOptional[String]("auth.sso.attributes.organisation").getOrElse("")
+
+    SimpleUser(
+      (jsObject \ idField).asOpt[String].getOrElse(""),
+      (jsObject \ nameField).asOpt[String].getOrElse("noname"),
+      (jsObject \ organisationField).asOpt[String].orElse(configuration.getOptional[String]("auth.sso.defaultOrganisation"))
+    )
+  }
 }
