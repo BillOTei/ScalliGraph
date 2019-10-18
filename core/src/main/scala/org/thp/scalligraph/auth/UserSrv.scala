@@ -13,7 +13,7 @@ trait PermissionTag
 object Permission {
   def apply(names: Set[String]): Set[Permission] = names.map(apply)
 
-  def apply(name: String): Permission            = shapeless.tag[PermissionTag][String](name)
+  def apply(name: String): Permission = shapeless.tag[PermissionTag][String](name)
 }
 
 trait AuthContext {
@@ -72,7 +72,7 @@ object SimpleUser {
 
   def apply(jsObject: JsObject, configuration: Configuration): SimpleUser = {
     val idField           = configuration.getOptional[String]("auth.sso.attributes.userId").getOrElse("")
-    val nameField         = configuration.getOptional[String]("auth.sso.attributes.userName").getOrElse("")
+    val nameField         = configuration.getOptional[String]("auth.sso.attributes.name").getOrElse("")
     val organisationField = configuration.getOptional[String]("auth.sso.attributes.organisation").getOrElse("")
 
     SimpleUser(
