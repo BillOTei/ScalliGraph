@@ -5,6 +5,7 @@ import org.thp.scalligraph.auth.GrantType.GrantType
 import org.thp.scalligraph.auth.ResponseType.ResponseType
 import org.thp.scalligraph.controllers.AuthenticatedRequest
 import org.thp.scalligraph.{AuthenticationError, BadConfigurationError}
+import play.api.libs.json.JsObject
 import play.api.libs.ws.{WSClient, WSResponse}
 import play.api.mvc._
 import play.api.{Configuration, Logger}
@@ -40,7 +41,8 @@ case class OAuth2Config(
     autoUpdate: Boolean
 )
 
-class TokenizedRequest[A](token: Option[String], request: Request[A]) extends WrappedRequest[A](request)
+class TokenizedRequest[A](val token: Option[String], request: Request[A])                extends WrappedRequest[A](request)
+class OAuthenticatedRequest[A](val user: Option[JsObject], request: TokenizedRequest[A]) extends WrappedRequest[A](request)
 
 class OAuth2Srv(OAuth2Config: OAuth2Config, userSrv: UserSrv, WSClient: WSClient)(implicit ec: ExecutionContext) extends AuthSrv {
   lazy val logger      = Logger(getClass)
@@ -52,6 +54,7 @@ class OAuth2Srv(OAuth2Config: OAuth2Config, userSrv: UserSrv, WSClient: WSClient
       case GrantType.authorizationCode =>
         authRedirect
           .andThen(authTokenFromCode)
+          .andThen(userFromToken)
           .andThen(super.actionFunction(nextFunction))
 
       case x =>
@@ -91,7 +94,8 @@ class OAuth2Srv(OAuth2Config: OAuth2Config, userSrv: UserSrv, WSClient: WSClient
         val code = request.queryString(ResponseType.code.toString).headOption.getOrElse("")
 
         logger.debug(s"Attempting to retrieve OAuth2 token from ${OAuth2Config.tokenUrl} with code $code")
-        Future.successful(new TokenizedRequest[A](None, request))
+        getAuthTokenFromCode(code)
+          .map(t => new TokenizedRequest[A](Some(t), request))
       }
   }
 
@@ -114,6 +118,38 @@ class OAuth2Srv(OAuth2Config: OAuth2Config, userSrv: UserSrv, WSClient: WSClient
         case r: WSResponse if r.status == 200 => Future.successful((r.json \ "access_token").asOpt[String].getOrElse(""))
         case _                                => Future.failed(AuthenticationError("OAuth2 unexpected response from server"))
       }
+
+  private def userFromToken: ActionTransformer[TokenizedRequest, OAuthenticatedRequest] =
+    new ActionTransformer[TokenizedRequest, OAuthenticatedRequest] {
+      def executionContext: ExecutionContext = ec
+
+      def transform[A](request: TokenizedRequest[A]): Future[OAuthenticatedRequest[A]] = {
+        for {
+          token    <- Future.fromTry(Try(request.token.get))
+          userJson <- getUserDataFromToken(token)
+        } yield new OAuthenticatedRequest[A](Some(userJson), request)
+      } recoverWith {
+        case e =>
+          if (request.token.isDefined)
+            logger.error(s"OAuth2 failed to fetch user data ${e.getMessage} with token ${request.token} at ${OAuth2Config.userUrl}")
+
+          Future.successful(new OAuthenticatedRequest[A](None, request))
+      }
+    }
+
+  private def getUserDataFromToken(token: String): Future[JsObject] =
+    WSClient
+      .url(OAuth2Config.userUrl)
+      .addHttpHeaders("Authorization" -> s"Bearer $token")
+      .get()
+      .recoverWith {
+        case error => Future.failed(AuthenticationError(s"OAuth2 user data fetch failure ${error.getMessage}"))
+      }
+      .flatMap {
+        case r: WSResponse if r.status == 200 => Future.successful(r.json.as[JsObject])
+
+        case _ => Future.failed(AuthenticationError("OAuth2 user data fetch unexpected response from server"))
+      }
 }
 
 @Singleton
@@ -134,7 +170,7 @@ class OAuth2Provider @Inject()(userSrv: UserSrv, config: Configuration, WSClient
       autoCreate = config.getOptional[Boolean]("auth.sso.autoCreate").getOrElse(false)
       autoUpdate = config.getOptional[Boolean]("auth.sso.autoUpdate").getOrElse(false)
     } yield new OAuth2Srv(
-      OAuth2Config(clientId, clientSecret, redirectUri, responseType, grantType, authorizationUrl, userUrl, tokenUrl, scope, autoCreate, autoUpdate),
+      OAuth2Config(clientId, clientSecret, redirectUri, responseType, grantType, authorizationUrl, tokenUrl, userUrl, scope, autoCreate, autoUpdate),
       userSrv,
       WSClient
     )
