@@ -72,7 +72,7 @@ object SimpleUser {
 
   def apply(jsObject: JsObject, configuration: Configuration): SimpleUser = {
     val idField           = configuration.getOptional[String]("auth.sso.attributes.userId").getOrElse("")
-    val nameField         = configuration.getOptional[String]("auth.sso.attributes.name").getOrElse("")
+    val nameField         = configuration.getOptional[String]("auth.sso.attributes.userName").getOrElse("")
     val organisationField = configuration.getOptional[String]("auth.sso.attributes.organisation").getOrElse("")
 
     SimpleUser(

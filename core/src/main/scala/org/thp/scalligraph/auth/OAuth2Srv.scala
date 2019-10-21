@@ -1,5 +1,6 @@
 package org.thp.scalligraph.auth
 
+import com.google.inject.Provider
 import javax.inject.{Inject, Singleton}
 import org.thp.scalligraph.auth.GrantType.GrantType
 import org.thp.scalligraph.auth.ResponseType.ResponseType
@@ -44,31 +45,45 @@ case class OAuth2Config(
 class TokenizedRequest[A](val token: Option[String], request: Request[A])                extends WrappedRequest[A](request)
 class OAuthenticatedRequest[A](val user: Option[JsObject], request: TokenizedRequest[A]) extends WrappedRequest[A](request)
 
-class OAuth2Srv(OAuth2Config: OAuth2Config, userSrv: UserSrv, WSClient: WSClient, configuration: Configuration)(implicit ec: ExecutionContext)
-    extends AuthSrv {
-  lazy val logger      = Logger(getClass)
-  val name: String     = "oauth2"
-  val endpoint: String = "ssoLogin"
+class OAuth2Srv(
+    OAuth2Config: OAuth2Config,
+    userSrv: UserSrv,
+    WSClient: WSClient,
+    configuration: Configuration,
+    sessionAuthProvider: Provider[AuthSrv]
+)(
+    implicit ec: ExecutionContext
+) extends AuthSrv {
+  lazy val logger                  = Logger(getClass)
+  lazy val sessionAuthSrv: AuthSrv = sessionAuthProvider.get()
+  val name: String                 = "oauth2"
+  val endpoint: String             = "ssoLogin"
 
   /**
     * Main Auth action
     * @return
     */
   override def actionFunction(nextFunction: ActionFunction[Request, AuthenticatedRequest]): ActionFunction[Request, AuthenticatedRequest] =
-    OAuth2Config.grantType match {
-      case GrantType.authorizationCode =>
-        authRedirect
-          .andThen(authTokenFromCode)
-          .andThen(userFromToken)
-          .andThen(authenticate)
-          .andThen(super.actionFunction(nextFunction))
+    new ActionFunction[Request, AuthenticatedRequest] {
+      override def invokeBlock[A](request: Request[A], block: AuthenticatedRequest[A] => Future[Result]): Future[Result] =
+        if (request.uri.contains(endpoint)) {
+          OAuth2Config.grantType match {
+            case GrantType.authorizationCode =>
+              if (!request.queryString.contains(ResponseType.code.toString)) {
+                authRedirect(request)
+              } else {
+                for {
+                  tokenizedRequest <- authTokenFromCode(request)
+                  oauth2Req        <- userFromToken(tokenizedRequest)
+                  authReq          <- authenticate(oauth2Req)
+                } yield sessionAuthSrv.setSessionUser(authReq.authContext)(Results.Ok)
+              }
 
-      case x =>
-        new ActionFunction[Request, AuthenticatedRequest] {
-          override def invokeBlock[A](request: Request[A], block: AuthenticatedRequest[A] => Future[Result]): Future[Result] =
-            Future.failed(BadConfigurationError(s"OAuth GrantType $x not supported yet"))
-          override protected def executionContext: ExecutionContext = ec
-        }
+            case x => Future.failed(BadConfigurationError(s"OAuth GrantType $x not supported yet"))
+          }
+        } else nextFunction.invokeBlock(request, block)
+
+      override protected def executionContext: ExecutionContext = ec
     }
 
   /**
@@ -76,21 +91,16 @@ class OAuth2Srv(OAuth2Config: OAuth2Config, userSrv: UserSrv, WSClient: WSClient
     * and redirecting to OAuth2 server if necessary
     * @return
     */
-  private def authRedirect: ActionFilter[Request] = new ActionFilter[Request] {
-    private val queryStringParams = Map[String, Seq[String]](
+  private def authRedirect[A](input: Request[A]) = {
+    val queryStringParams = Map[String, Seq[String]](
       "scope"         -> Seq(OAuth2Config.scope.mkString(" ")),
       "response_type" -> Seq(ResponseType.code.toString),
       "redirect_uri"  -> Seq(OAuth2Config.redirectUri),
       "client_id"     -> Seq(OAuth2Config.clientId)
     )
-    def executionContext: ExecutionContext = ec
 
-    def filter[A](input: Request[A]): Future[Option[Result]] = Future.successful {
-      if (input.uri.contains(endpoint) && !input.queryString.contains(ResponseType.code.toString)) {
-        logger.debug(s"Redirecting to ${OAuth2Config.redirectUri} with $queryStringParams")
-        Some(Results.Redirect(OAuth2Config.authorizationUrl, queryStringParams, status = 200))
-      } else None
-    }
+    logger.debug(s"Redirecting to ${OAuth2Config.redirectUri} with $queryStringParams")
+    Future.successful(Results.Redirect(OAuth2Config.authorizationUrl, queryStringParams, status = 200))
   }
 
   /**
@@ -98,22 +108,18 @@ class OAuth2Srv(OAuth2Config: OAuth2Config, userSrv: UserSrv, WSClient: WSClient
     * from OAuth2 code
     * @return
     */
-  private def authTokenFromCode: ActionTransformer[Request, TokenizedRequest] = new ActionTransformer[Request, TokenizedRequest] {
-    def executionContext: ExecutionContext = ec
+  private def authTokenFromCode[A](request: Request[A]) =
+    if (!request.uri.contains(endpoint)) {
+      Future.successful(new TokenizedRequest[A](None, request))
+    } else if (!request.queryString.contains(ResponseType.code.toString)) {
+      Future.failed(AuthenticationError(s"OAuth2 server code missing ${request.queryString.get("error")}"))
+    } else {
+      val code = request.queryString(ResponseType.code.toString).headOption.getOrElse("")
 
-    def transform[A](request: Request[A]): Future[TokenizedRequest[A]] =
-      if (!request.uri.contains(endpoint)) {
-        Future.successful(new TokenizedRequest[A](None, request))
-      } else if (!request.queryString.contains(ResponseType.code.toString)) {
-        Future.failed(AuthenticationError(s"OAuth2 server code missing ${request.queryString.get("error")}"))
-      } else {
-        val code = request.queryString(ResponseType.code.toString).headOption.getOrElse("")
-
-        logger.debug(s"Attempting to retrieve OAuth2 token from ${OAuth2Config.tokenUrl} with code $code")
-        getAuthTokenFromCode(code)
-          .map(t => new TokenizedRequest[A](Some(t), request))
-      }
-  }
+      logger.debug(s"Attempting to retrieve OAuth2 token from ${OAuth2Config.tokenUrl} with code $code")
+      getAuthTokenFromCode(code)
+        .map(t => new TokenizedRequest[A](Some(t), request))
+    }
 
   /**
     * Querying the OAuth2 server for a token
@@ -144,23 +150,18 @@ class OAuth2Srv(OAuth2Config: OAuth2Config, userSrv: UserSrv, WSClient: WSClient
     * Enriched action with OAuth2 server user data
     * @return
     */
-  private def userFromToken: ActionTransformer[TokenizedRequest, OAuthenticatedRequest] =
-    new ActionTransformer[TokenizedRequest, OAuthenticatedRequest] {
-      def executionContext: ExecutionContext = ec
+  private def userFromToken[A](request: TokenizedRequest[A]) = {
+    for {
+      token    <- Future.fromTry(Try(request.token.get))
+      userJson <- getUserDataFromToken(token)
+    } yield new OAuthenticatedRequest[A](Some(userJson), request)
+  } recoverWith {
+    case e =>
+      if (request.token.isDefined)
+        logger.error(s"OAuth2 failed to fetch user data ${e.getMessage} with token ${request.token} at ${OAuth2Config.userUrl}")
 
-      def transform[A](request: TokenizedRequest[A]): Future[OAuthenticatedRequest[A]] = {
-        for {
-          token    <- Future.fromTry(Try(request.token.get))
-          userJson <- getUserDataFromToken(token)
-        } yield new OAuthenticatedRequest[A](Some(userJson), request)
-      } recoverWith {
-        case e =>
-          if (request.token.isDefined)
-            logger.error(s"OAuth2 failed to fetch user data ${e.getMessage} with token ${request.token} at ${OAuth2Config.userUrl}")
-
-          Future.successful(new OAuthenticatedRequest[A](None, request))
-      }
-    }
+      Future.successful(new OAuthenticatedRequest[A](None, request))
+  }
 
   /**
     * Client query for user data with OAuth2 token
@@ -181,22 +182,22 @@ class OAuth2Srv(OAuth2Config: OAuth2Config, userSrv: UserSrv, WSClient: WSClient
         case _ => Future.failed(AuthenticationError("OAuth2 user data fetch unexpected response from server"))
       }
 
-  private def authenticate: ActionTransformer[OAuthenticatedRequest, AuthenticatedRequest] =
-    new ActionTransformer[OAuthenticatedRequest, AuthenticatedRequest] {
-      def executionContext: ExecutionContext = ec
-
-      def transform[A](request: OAuthenticatedRequest[A]): Future[AuthenticatedRequest[A]] =
-        for {
-          jsonUser <- Future.fromTry(Try(request.user.get))
-          user = SimpleUser.apply(jsonUser, configuration)
-          authContext <- Future.fromTry(userSrv.getAuthContext(request, user.id, user.organisation))
-        } yield new AuthenticatedRequest[A](authContext, request)
-    }
+  private def authenticate[A](request: OAuthenticatedRequest[A]) =
+    for {
+      jsonUser <- Future.fromTry(Try(request.user.get))
+      user = SimpleUser.apply(jsonUser, configuration)
+      authContext <- Future.fromTry(userSrv.getAuthContext(request, user.id, user.organisation))
+    } yield new AuthenticatedRequest[A](authContext, request)
 }
 
 @Singleton
-class OAuth2Provider @Inject()(userSrv: UserSrv, config: Configuration, WSClient: WSClient, implicit val executionContext: ExecutionContext)
-    extends AuthSrvProvider {
+class OAuth2Provider @Inject()(
+    userSrv: UserSrv,
+    config: Configuration,
+    WSClient: WSClient,
+    implicit val executionContext: ExecutionContext,
+    provider: Provider[AuthSrv]
+) extends AuthSrvProvider {
   override val name: String = "oauth2"
   override def apply(configuration: Configuration): Try[AuthSrv] =
     for {
@@ -215,6 +216,7 @@ class OAuth2Provider @Inject()(userSrv: UserSrv, config: Configuration, WSClient
       OAuth2Config(clientId, clientSecret, redirectUri, responseType, grantType, authorizationUrl, tokenUrl, userUrl, scope, autoCreate, autoUpdate),
       userSrv,
       WSClient,
-      configuration
+      config,
+      provider
     )
 }
