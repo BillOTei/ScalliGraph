@@ -28,24 +28,24 @@ object ResponseType extends Enumeration {
 }
 
 case class OAuth2Config(
-                         clientId: String,
-                         clientSecret: String,
-                         redirectUri: String,
-                         responseType: ResponseType,
-                         grantType: GrantType,
-                         authorizationUrl: String,
-                         tokenUrl: String,
-                         userUrl: String,
-                         scope: Seq[String],
-                         autoCreate: Boolean,
-                         autoUpdate: Boolean
-                       )
+    clientId: String,
+    clientSecret: String,
+    redirectUri: String,
+    responseType: ResponseType,
+    grantType: GrantType,
+    authorizationUrl: String,
+    tokenUrl: String,
+    userUrl: String,
+    scope: Seq[String],
+    autoCreate: Boolean,
+    autoUpdate: Boolean
+)
 
 class TokenizedRequest[A](val token: Option[String], request: Request[A])                extends WrappedRequest[A](request)
 class OAuthenticatedRequest[A](val user: Option[JsObject], request: TokenizedRequest[A]) extends WrappedRequest[A](request)
 
 class OAuth2Srv(OAuth2Config: OAuth2Config, userSrv: UserSrv, WSClient: WSClient, configuration: Configuration)(implicit ec: ExecutionContext)
-  extends AuthSrv {
+    extends AuthSrv {
   lazy val logger      = Logger(getClass)
   val name: String     = "oauth2"
   val endpoint: String = "ssoLogin"
@@ -168,7 +168,7 @@ class OAuth2Srv(OAuth2Config: OAuth2Config, userSrv: UserSrv, WSClient: WSClient
 
 @Singleton
 class OAuth2Provider @Inject()(userSrv: UserSrv, config: Configuration, WSClient: WSClient, implicit val executionContext: ExecutionContext)
-  extends AuthSrvProvider {
+    extends AuthSrvProvider {
   override val name: String = "oauth2"
   override def apply(configuration: Configuration): Try[AuthSrv] =
     for {
