@@ -50,6 +50,10 @@ class OAuth2Srv(OAuth2Config: OAuth2Config, userSrv: UserSrv, WSClient: WSClient
   val name: String     = "oauth2"
   val endpoint: String = "ssoLogin"
 
+  /**
+    * Main Auth action
+    * @return
+    */
   override def actionFunction(nextFunction: ActionFunction[Request, AuthenticatedRequest]): ActionFunction[Request, AuthenticatedRequest] =
     OAuth2Config.grantType match {
       case GrantType.authorizationCode =>
@@ -67,6 +71,11 @@ class OAuth2Srv(OAuth2Config: OAuth2Config, userSrv: UserSrv, WSClient: WSClient
         }
     }
 
+  /**
+    * Filter checking whether we initiate the OAuth2 process
+    * and redirecting to OAuth2 server if necessary
+    * @return
+    */
   private def authRedirect: ActionFilter[Request] = new ActionFilter[Request] {
     private val queryStringParams = Map[String, Seq[String]](
       "scope"         -> Seq(OAuth2Config.scope.mkString(" ")),
@@ -84,6 +93,11 @@ class OAuth2Srv(OAuth2Config: OAuth2Config, userSrv: UserSrv, WSClient: WSClient
     }
   }
 
+  /**
+    * Enriching the initial request with OAuth2 token gotten
+    * from OAuth2 code
+    * @return
+    */
   private def authTokenFromCode: ActionTransformer[Request, TokenizedRequest] = new ActionTransformer[Request, TokenizedRequest] {
     def executionContext: ExecutionContext = ec
 
@@ -101,6 +115,11 @@ class OAuth2Srv(OAuth2Config: OAuth2Config, userSrv: UserSrv, WSClient: WSClient
       }
   }
 
+  /**
+    * Querying the OAuth2 server for a token
+    * @param code the previously obtained code
+    * @return
+    */
   private def getAuthTokenFromCode(code: String): Future[String] =
     WSClient
       .url(OAuth2Config.tokenUrl)
@@ -121,6 +140,10 @@ class OAuth2Srv(OAuth2Config: OAuth2Config, userSrv: UserSrv, WSClient: WSClient
         case _                                => Future.failed(AuthenticationError("OAuth2 unexpected response from server"))
       }
 
+  /**
+    * Enriched action with OAuth2 server user data
+    * @return
+    */
   private def userFromToken: ActionTransformer[TokenizedRequest, OAuthenticatedRequest] =
     new ActionTransformer[TokenizedRequest, OAuthenticatedRequest] {
       def executionContext: ExecutionContext = ec
@@ -139,6 +162,11 @@ class OAuth2Srv(OAuth2Config: OAuth2Config, userSrv: UserSrv, WSClient: WSClient
       }
     }
 
+  /**
+    * Client query for user data with OAuth2 token
+    * @param token the token
+    * @return
+    */
   private def getUserDataFromToken(token: String): Future[JsObject] =
     WSClient
       .url(OAuth2Config.userUrl)
