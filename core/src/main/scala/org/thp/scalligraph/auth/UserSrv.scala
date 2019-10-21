@@ -13,7 +13,7 @@ trait PermissionTag
 object Permission {
   def apply(names: Set[String]): Set[Permission] = names.map(apply)
 
-  def apply(name: String): Permission = shapeless.tag[PermissionTag][String](name)
+  def apply(name: String): Permission            = shapeless.tag[PermissionTag][String](name)
 }
 
 trait AuthContext {
